@@ -283,8 +283,20 @@ async function main() {
 
                 // Price information - use data-qa selector
                 const priceContainer = $product.find('[data-qa="plp-product-box-price"]');
-                const currentPriceText = priceContainer.find('strong').first().text() || priceContainer.text();
-                const originalPriceText = priceContainer.find('span').first().text();
+
+                // Current price is usually in <strong> or first number
+                const currentPriceText = priceContainer.find('strong').first().text() ||
+                    priceContainer.find('[class*="sellingPrice"], [class*="current"]').first().text() ||
+                    priceContainer.text();
+
+                // Original price (was price) is usually in a span with strikethrough or "was" class
+                const originalPriceText = priceContainer.find('[class*="oldPrice"], [class*="wasPrice"], [class*="was"], span[style*="line-through"]').first().text() ||
+                    priceContainer.find('span').filter((_, el) => {
+                        const text = $(el).text();
+                        const price = cleanPrice(text);
+                        return price && price > cleanPrice(currentPriceText);
+                    }).first().text();
+
                 const discountText = $product.find('[class*="discount"], [data-qa*="discount"], [class*="OFF"]').first().text();
 
                 const currentPrice = cleanPrice(currentPriceText);
@@ -295,19 +307,39 @@ async function main() {
                 // Noon displays rating like "4.3" and reviews like "(43)" or "43 Ratings"
                 const productBoxText = $product.text();
 
-                // Extract rating (e.g., "4.3" or "4.5")
-                const ratingMatch = productBoxText.match(/\b([1-5]\.\d)\b/);
-                const rating = ratingMatch ? parseFloat(ratingMatch[1]) : null;
+                // Extract rating (e.g., "4.3" or "4.5") - more flexible pattern
+                const ratingPatterns = [
+                    /\b([1-5]\.\d{1,2})\b/,  // 4.3, 4.35
+                    /([1-5])\s*(?:stars?|out of 5)/i,  // 4 stars, 5 out of 5
+                ];
+                let rating = null;
+                for (const pattern of ratingPatterns) {
+                    const match = productBoxText.match(pattern);
+                    if (match) {
+                        rating = parseFloat(match[1]);
+                        log.debug(`[HTML] Found rating '${match[1]}' with pattern '${pattern}'`);
+                        break;
+                    }
+                }
 
                 // Extract reviews count (e.g., "(43)" or "43 Ratings" or "(1.2K)")
-                const reviewsMatch = productBoxText.match(/\((\d+(?:,\d+)*(?:\.\d+)?K?)\)|([\d,]+)\s*(?:Ratings?|Reviews?)/i);
+                const reviewsPatterns = [
+                    /\((\d+(?:,\d+)*(?:\.\d+)?K?)\)/,  // (43) or (1.2K)
+                    /(\d+(?:,\d+)*)\s*(?:ratings?|reviews?)/i,  // 43 Ratings
+                    /(\d+(?:\.\d+)?K?)\s*(?:ratings?|reviews?)/i,  // 1.2K ratings
+                ];
                 let reviewsCount = null;
-                if (reviewsMatch) {
-                    const reviewStr = reviewsMatch[1] || reviewsMatch[2];
-                    if (reviewStr.toUpperCase().includes('K')) {
-                        reviewsCount = Math.round(parseFloat(reviewStr.replace(/K/i, '')) * 1000);
-                    } else {
-                        reviewsCount = parseInt(reviewStr.replace(/,/g, ''));
+                for (const pattern of reviewsPatterns) {
+                    const match = productBoxText.match(pattern);
+                    if (match) {
+                        const reviewStr = match[1];
+                        if (reviewStr.toUpperCase().includes('K')) {
+                            reviewsCount = Math.round(parseFloat(reviewStr.replace(/K/i, '')) * 1000);
+                        } else {
+                            reviewsCount = parseInt(reviewStr.replace(/,/g, ''));
+                        }
+                        log.debug(`[HTML] Found reviews count '${reviewStr}' with pattern '${pattern}'`);
+                        break;
                     }
                 }
 
@@ -587,20 +619,7 @@ async function main() {
                     if (apiResult.success && apiResult.products.length > 0) {
                         crawlerLog.info(`✅ [API] Successfully fetched ${apiResult.products.length} products from API`);
                         productsToSave = apiResult.products;
-
-                        // Queue next page if available
-                        if (apiResult.pagination.hasNext && pageCount < MAX_PAGES && saved < MAX_PRODUCTS) {
-                            const nextPageNum = currentPage + 1;
-                            const nextUrl = new URL(request.url);
-                            nextUrl.searchParams.set('page', String(nextPageNum));
-
-                            await crawler.addRequests([{
-                                url: nextUrl.href,
-                                userData: { label: 'LIST', page: nextPageNum },
-                            }]);
-
-                            crawlerLog.info(`➡️ [API] Queued next page: ${nextPageNum}`);
-                        }
+                        // Note: Pagination will be queued AFTER saving products
                     }
                     // ========================================
                     // STEP 2: Fallback to HTML parsing
@@ -652,44 +671,7 @@ async function main() {
                                 productsToSave.push(productData);
                             }
                         });
-
-                        // HTML pagination
-                        if (saved < MAX_PRODUCTS && pageCount < MAX_PAGES) {
-                            const isProductLink = (href) => href && /\/p\//i.test(href);
-                            // Look for next page link
-                            const nextPageLink = $('a[aria-label*="next"]').first().attr('href') ||
-                                $('a[class*="next"]').first().attr('href') ||
-                                $(`a:contains("${currentPage + 1}")`).first().attr('href');
-
-                            if (nextPageLink && !isProductLink(nextPageLink)) {
-                                const nextUrl = toAbs(nextPageLink, request.url);
-                                await crawler.addRequests([{
-                                    url: nextUrl,
-                                    userData: { label: 'LIST', page: currentPage + 1 },
-                                }]);
-                                crawlerLog.info(`➡️ [HTML] Queued next page: ${nextUrl}`);
-                            } else {
-                                // Try constructing next page URL
-                                const nextUrl = new URL(request.url);
-                                if (isProductLink(nextUrl.pathname)) {
-                                    const parts = nextUrl.pathname.split('/').filter(Boolean);
-                                    const pIndex = parts.findIndex((p) => p.toLowerCase() === 'p');
-                                    const listParts = pIndex > 0 ? parts.slice(0, pIndex) : parts;
-                                    nextUrl.pathname = `/${listParts.join('/')}/`;
-                                }
-                                nextUrl.searchParams.set('page', String(currentPage + 1));
-                                if (!nextUrl.searchParams.has('limit')) {
-                                    nextUrl.searchParams.set('limit', '50');
-                                }
-
-                                await crawler.addRequests([{
-                                    url: nextUrl.href,
-                                    userData: { label: 'LIST', page: currentPage + 1 },
-                                }]);
-
-                                crawlerLog.info(`➡️ [HTML] Constructed next page URL: ${nextUrl.href}`);
-                            }
-                        }
+                        // Note: Pagination will be queued AFTER saving products
                     }
 
                     // ========================================
@@ -723,6 +705,62 @@ async function main() {
                         }
                     } else {
                         crawlerLog.warning('⚠️ No valid products to save from this page');
+                    }
+
+                    // ========================================
+                    // STEP 4: Queue next page ONLY if needed
+                    // ========================================
+                    if (saved < MAX_PRODUCTS && pageCount < MAX_PAGES) {
+                        if (apiResult.success && apiResult.pagination?.hasNext) {
+                            // API pagination
+                            const nextPageNum = currentPage + 1;
+                            const nextUrl = new URL(request.url);
+                            nextUrl.searchParams.set('page', String(nextPageNum));
+
+                            await crawler.addRequests([{
+                                url: nextUrl.href,
+                                userData: { label: 'LIST', page: nextPageNum },
+                            }]);
+
+                            crawlerLog.info(`➡️ [API] Queued next page: ${nextPageNum}`);
+                        } else if (productsToSave.length > 0) {
+                            // HTML pagination
+                            const isProductLink = (href) => href && /\/p\//i.test(href);
+                            const nextPageLink = $('a[aria-label*="next"]').first().attr('href') ||
+                                $('a[class*="next"]').first().attr('href') ||
+                                $(`a:contains("${currentPage + 1}")`).first().attr('href');
+
+                            if (nextPageLink && !isProductLink(nextPageLink)) {
+                                const nextUrl = toAbs(nextPageLink, request.url);
+                                await crawler.addRequests([{
+                                    url: nextUrl,
+                                    userData: { label: 'LIST', page: currentPage + 1 },
+                                }]);
+                                crawlerLog.info(`➡️ [HTML] Queued next page: ${nextUrl}`);
+                            } else {
+                                // Try constructing next page URL
+                                const nextUrl = new URL(request.url);
+                                if (isProductLink(nextUrl.pathname)) {
+                                    const parts = nextUrl.pathname.split('/').filter(Boolean);
+                                    const pIndex = parts.findIndex((p) => p.toLowerCase() === 'p');
+                                    const listParts = pIndex > 0 ? parts.slice(0, pIndex) : parts;
+                                    nextUrl.pathname = `/${listParts.join('/')}/`;
+                                }
+                                nextUrl.searchParams.set('page', String(currentPage + 1));
+                                if (!nextUrl.searchParams.has('limit')) {
+                                    nextUrl.searchParams.set('limit', '50');
+                                }
+
+                                await crawler.addRequests([{
+                                    url: nextUrl.href,
+                                    userData: { label: 'LIST', page: currentPage + 1 },
+                                }]);
+
+                                crawlerLog.info(`➡️ [HTML] Constructed next page URL: ${nextUrl.href}`);
+                            }
+                        }
+                    } else {
+                        crawlerLog.info(`🛑 Stopping pagination: saved=${saved}/${MAX_PRODUCTS}, pages=${pageCount}/${MAX_PAGES}`);
                     }
 
                     // Add small delay between requests (faster)
