@@ -30,7 +30,7 @@ async function main() {
             url,
             maxProducts = 100,
             maxPages = 10,
-            fetchDetails = false, // enable detail-page enrichment (slower)
+            fetchDetails = true, // enable detail-page enrichment by default (limits below keep it light)
             detailSampleLimit = 10, // limit number of detail fetches for speed
             proxyConfiguration,
         } = input;
@@ -269,16 +269,23 @@ async function main() {
                 const discount = discountText ? cleanText(discountText) : null;
                 
                 // Rating
-                const ratingText = $product.find('[class*="rating"]').first().text();
-                const rating = ratingText ? parseFloat(ratingText) : null;
+                const ratingText = cleanText(
+                    $product.find('[data-qa*="rating"], [aria-label*="rating"], [class*="rating"]').first().text()
+                );
+                const rating = ratingText ? parseFloat((ratingText.match(/[0-9.]+/) || [])[0]) : null;
                 
                 // Reviews count
-                const reviewsText = $product.find('[class*="reviews"], [class*="rating"]').text();
-                const reviewsMatch = reviewsText.match(/\d+/);
-                const reviews = reviewsMatch ? parseInt(reviewsMatch[0]) : null;
+                const reviewsText = cleanText(
+                    $product.find('[class*="reviews"], [class*="rating"], [aria-label*="review"]').text() ||
+                    ratingText
+                );
+                const reviewsMatch = reviewsText.match(/\d{1,3}(?:,\d{3})*/);
+                const reviews = reviewsMatch ? parseInt(reviewsMatch[0].replace(/,/g, '')) : null;
                 
                 // Brand
-                const brand = cleanText($product.find('[class*="brand"]').text()) || null;
+                const brand = cleanText(
+                    $product.find('[data-qa*="brand"], [class*="brand"], a[href*="brand"]').first().text()
+                ) || null;
                 
                 // Product SKU/ID from URL
                 const skuMatch = fullUrl ? fullUrl.match(/\/([A-Z0-9]+)\/p\//) : null;
@@ -357,29 +364,72 @@ async function main() {
 
                 const $ = loadHtml(resp.body);
 
+                // Try structured data first (JSON-LD)
+                let ldDescription = null;
+                let ldBrand = null;
+                let ldRating = null;
+                let ldReviews = null;
+                $('script[type="application/ld+json"]').each((_, el) => {
+                    try {
+                        const parsed = JSON.parse($(el).text().trim());
+                        const nodes = Array.isArray(parsed) ? parsed : [parsed];
+                        for (const node of nodes) {
+                            if (!node || typeof node !== 'object') continue;
+                            const isProduct = node['@type'] === 'Product' || (Array.isArray(node['@type']) && node['@type'].includes('Product'));
+                            if (!isProduct) continue;
+
+                            ldDescription = ldDescription || cleanText(node.description || node?.mainEntity?.description);
+                            const brandVal = node.brand;
+                            if (brandVal) {
+                                if (typeof brandVal === 'string') ldBrand = ldBrand || cleanText(brandVal);
+                                if (typeof brandVal === 'object') ldBrand = ldBrand || cleanText(brandVal.name);
+                            }
+                            const agg = node.aggregateRating || node?.mainEntity?.aggregateRating;
+                            if (agg) {
+                                ldRating = ldRating || agg.ratingValue || agg.rating;
+                                ldReviews = ldReviews || agg.reviewCount || agg.ratingCount;
+                            }
+                        }
+                    } catch {
+                        // ignore malformed JSON-LD
+                    }
+                });
+
+                const metaDescription = cleanText(
+                    $('meta[name="description"]').attr('content') ||
+                    $('meta[property="og:description"]').attr('content')
+                );
+
                 const description = cleanText(
                     $('.OverviewTab-module-scss-module__NTeOuq__row').text() ||
                     $('[data-qa*="overview"]').text() ||
-                    $('section:contains("Overview")').text()
+                    $('section:contains("Overview")').text() ||
+                    metaDescription ||
+                    ldDescription
                 ) || product.description;
 
                 const brand = cleanText(
                     $('span.BrandStoreCtaV2-module-scss-module___vJ0Tq__textContent.BrandStoreCtaV2-module-scss-module___vJ0Tq__brandStoreText').text() ||
-                    $('a[aria-label*="brand"], a[href*="brand"] span').first().text()
+                    $('a[aria-label*="brand"], a[href*="brand"] span').first().text() ||
+                    ldBrand
                 ) || product.brand;
 
                 const ratingText = cleanText(
                     $('div.NoonRatings-module-scss-module__ABB9HW__overallRating').first().text() ||
-                    $('[data-qa*="rating"]').first().text()
+                    $('[data-qa*="rating"]').first().text() ||
+                    $('[aria-label*="rating"]').first().text() ||
+                    String(ldRating || '')
                 );
-                const rating = ratingText ? parseFloat(ratingText) : product.rating;
+                const rating = ratingText ? parseFloat((ratingText.match(/[0-9.]+/) || [])[0]) : product.rating;
 
                 const reviewsText = cleanText(
                     $('div.ProductReviewsFilters-module-scss-module__hOBdza__reviewTopicInner').first().text() ||
-                    $('[data-qa*="reviews"]').first().text()
+                    $('[data-qa*="reviews"]').first().text() ||
+                    $('[aria-label*="review"]').first().text() ||
+                    String(ldReviews || '')
                 );
-                const reviewsMatch = reviewsText.match(/\d+/);
-                const reviewsCount = reviewsMatch ? parseInt(reviewsMatch[0]) : product.reviewsCount;
+                const reviewsMatch = reviewsText.match(/\d{1,3}(?:,\d{3})*/);
+                const reviewsCount = reviewsMatch ? parseInt(reviewsMatch[0].replace(/,/g, '')) : product.reviewsCount;
 
                 return {
                     ...product,
@@ -563,7 +613,8 @@ async function main() {
                         const enrichedProducts = [];
                         let detailFetched = 0;
                         for (const prod of validProducts) {
-                            if (fetchDetails && detailFetched < detailSampleLimit) {
+                            const needsDetail = !prod.description || !prod.brand || !prod.rating || !prod.reviewsCount;
+                            if (fetchDetails && detailFetched < detailSampleLimit && needsDetail) {
                                 const enriched = await enrichProductWithDetails(prod);
                                 enrichedProducts.push(enriched);
                                 detailFetched += 1;
