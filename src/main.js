@@ -254,7 +254,7 @@ async function main() {
         // HTML PARSING (FALLBACK METHOD)
         // ==========================================
 
-        function extractProductData($, productElement, baseUrl) {
+        function extractProductData($, productElement, baseUrl, productMap = {}) {
             try {
                 const $product = $(productElement);
 
@@ -265,8 +265,20 @@ async function main() {
 
                 if (!fullUrl) return null;
 
+                // Product SKU/ID from URL - improved regex
+                const skuMatch = fullUrl ? fullUrl.match(/\/([A-Z0-9]+)(?:\/p\/|\?|$)/i) : null;
+                const sku = skuMatch ? skuMatch[1] : null;
+
+                // --- TRY JSON LOOKUP FIRST ---
+                let jsonProduct = null;
+                if (sku && productMap[sku]) {
+                    jsonProduct = productMap[sku];
+                }
+
                 // Product Title - use data-qa selector (Noon uses plp-product-box-name)
                 const title = cleanText(
+                    jsonProduct?.name ||
+                    jsonProduct?.title ||
                     $product.find('[data-qa="plp-product-box-name"]').text() ||
                     $product.find('h2').first().text() ||
                     $product.find('[class*="productTitle"]').text() ||
@@ -277,19 +289,21 @@ async function main() {
 
                 // Product Image - use data-qa selector
                 const imageElement = $product.find('[data-qa^="productImagePLP"] img, img[src*="nooncdn"], img').first();
-                const image = imageElement.attr('src') ||
+                const image = jsonProduct?.image_key ? `https://f.nooncdn.com/products/${jsonProduct.image_key}.jpg` : (
+                    imageElement.attr('src') ||
                     imageElement.attr('data-src') ||
-                    imageElement.attr('srcset')?.split(' ')[0] || null;
+                    imageElement.attr('srcset')?.split(' ')[0] || null
+                );
 
                 // Price information - use data-qa selector
                 const priceContainer = $product.find('[data-qa="plp-product-box-price"]');
 
-                // Current price is usually in <strong> or first number
+                // Current price
                 const currentPriceText = priceContainer.find('strong').first().text() ||
                     priceContainer.find('[class*="sellingPrice"], [class*="current"]').first().text() ||
                     priceContainer.text();
 
-                // Original price (was price) is usually in a span with strikethrough or "was" class
+                // Original price
                 const originalPriceText = priceContainer.find('[class*="oldPrice"], [class*="wasPrice"], [class*="was"], span[style*="line-through"]').first().text() ||
                     priceContainer.find('span').filter((_, el) => {
                         const text = $(el).text();
@@ -299,70 +313,86 @@ async function main() {
 
                 const discountText = $product.find('[class*="discount"], [data-qa*="discount"], [class*="OFF"]').first().text();
 
-                const currentPrice = cleanPrice(currentPriceText);
-                const originalPrice = cleanPrice(originalPriceText);
+                const currentPrice = jsonProduct?.uom_price || jsonProduct?.sale_price || cleanPrice(currentPriceText);
+                const originalPrice = jsonProduct?.price || jsonProduct?.original_price || cleanPrice(originalPriceText);
                 const discount = discountText ? cleanText(discountText) : null;
 
-                // Rating & Reviews - extract from product box text using regex patterns
-                // Noon displays rating like "4.3" and reviews like "(43)" or "43 Ratings"
-                const productBoxText = $product.text();
+                // --- RATING & REVIEWS ---
+                let rating = jsonProduct?.brand_rating?.value || jsonProduct?.rating || null;
+                let reviewsCount = jsonProduct?.rating_count || jsonProduct?.reviews_count || null;
 
-                // Extract rating (e.g., "4.3" or "4.5") - more flexible pattern
-                const ratingPatterns = [
-                    /\b([1-5]\.\d{1,2})\b/,  // 4.3, 4.35
-                    /([1-5])\s*(?:stars?|out of 5)/i,  // 4 stars, 5 out of 5
-                ];
-                let rating = null;
-                for (const pattern of ratingPatterns) {
-                    const match = productBoxText.match(pattern);
-                    if (match) {
-                        rating = parseFloat(match[1]);
-                        log.debug(`[HTML] Found rating '${match[1]}' with pattern '${pattern}'`);
-                        break;
-                    }
-                }
-
-                // Extract reviews count (e.g., "(43)" or "43 Ratings" or "(1.2K)")
-                const reviewsPatterns = [
-                    /\((\d+(?:,\d+)*(?:\.\d+)?K?)\)/,  // (43) or (1.2K)
-                    /(\d+(?:,\d+)*)\s*(?:ratings?|reviews?)/i,  // 43 Ratings
-                    /(\d+(?:\.\d+)?K?)\s*(?:ratings?|reviews?)/i,  // 1.2K ratings
-                ];
-                let reviewsCount = null;
-                for (const pattern of reviewsPatterns) {
-                    const match = productBoxText.match(pattern);
-                    if (match) {
-                        const reviewStr = match[1];
-                        if (reviewStr.toUpperCase().includes('K')) {
-                            reviewsCount = Math.round(parseFloat(reviewStr.replace(/K/i, '')) * 1000);
-                        } else {
-                            reviewsCount = parseInt(reviewStr.replace(/,/g, ''));
+                // DOM Fallback for Rating
+                if (!rating) {
+                    const ratingText = $product.find('[class*="RatingPreviewStar"] [class*="textCtr"]').text() ||
+                        $product.find('[class*="RatingPreviewStar"] span').first().text();
+                    const ratingMatch = ratingText ? ratingText.match(/([1-5]\.?\d?)/) : null;
+                    if (ratingMatch) {
+                        rating = parseFloat(ratingMatch[1]);
+                    } else {
+                        // Regex search in full text
+                        const productBoxText = $product.text();
+                        const patterns = [/\b([1-5]\.\d{1,2})\b/, /([1-5])\s*(?:stars?|out of 5)/i];
+                        for (const pattern of patterns) {
+                            const match = productBoxText.match(pattern);
+                            if (match) {
+                                rating = parseFloat(match[1]);
+                                break;
+                            }
                         }
-                        log.debug(`[HTML] Found reviews count '${reviewStr}' with pattern '${pattern}'`);
-                        break;
                     }
                 }
 
-                // Brand - extract from data-qa or title
+                // DOM Fallback for Reviews
+                if (!reviewsCount) {
+                    // Try sibling of rating star container (common pattern on listing page)
+                    const reviewsSpan = $product.find('[class*="RatingPreviewStar"] + div span').text();
+                    if (reviewsSpan) {
+                        const match = reviewsSpan.match(/(\d+(?:,\d+)*(?:\.\d+)?K?)/i);
+                        if (match) {
+                            const str = match[1];
+                            reviewsCount = str.toUpperCase().includes('K') ?
+                                Math.round(parseFloat(str.replace(/K/i, '')) * 1000) :
+                                parseInt(str.replace(/,/g, ''));
+                        }
+                    }
+
+                    if (!reviewsCount) {
+                        // Full text regex fallback
+                        const productBoxText = $product.text();
+                        const patterns = [
+                            /\((\d+(?:,\d+)*(?:\.\d+)?K?)\)/,
+                            /(\d+(?:,\d+)*)\s*(?:ratings?|reviews?)/i
+                        ];
+                        for (const pattern of patterns) {
+                            const match = productBoxText.match(pattern);
+                            if (match) {
+                                const str = match[1];
+                                reviewsCount = str.toUpperCase().includes('K') ?
+                                    Math.round(parseFloat(str.replace(/K/i, '')) * 1000) :
+                                    parseInt(str.replace(/,/g, ''));
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // --- BRAND ---
                 let brand = cleanText(
+                    jsonProduct?.brand ||
+                    jsonProduct?.brand_name ||
                     $product.find('[data-qa*="brand"], a[href*="/brand/"]').first().text()
                 );
 
-                // If no brand found, try to extract from title (first word if it looks like a brand)
+                // Listing page fallback: First word of title if not found (very common on Noon listing cards)
                 if (!brand && title) {
                     const titleParts = title.split(' ');
-                    if (titleParts.length > 1) {
-                        const possibleBrand = titleParts[0];
-                        // Brand is usually capitalized or all caps
-                        if (possibleBrand.length >= 2 && /^[A-Z]/.test(possibleBrand)) {
-                            brand = possibleBrand;
+                    if (titleParts.length > 0) {
+                        // Simple heuristic: Take first word if capitalized
+                        if (/^[A-Z0-9]/.test(titleParts[0])) {
+                            brand = titleParts[0];
                         }
                     }
                 }
-
-                // Product SKU/ID from URL - improved regex
-                const skuMatch = fullUrl ? fullUrl.match(/\/([A-Z0-9]+)(?:\/p\/|\?|$)/i) : null;
-                const sku = skuMatch ? skuMatch[1] : null;
 
                 return {
                     title: title,
@@ -681,8 +711,57 @@ async function main() {
                     // ========================================
                     // STEP 2: Fallback to HTML parsing
                     // ========================================
+                    // ========================================
+                    // STEP 2: Fallback to HTML parsing
+                    // ========================================
                     else {
                         crawlerLog.warning('⚠️ [API] Failed, falling back to HTML parsing');
+
+                        // --- NEW: Parse Next.js Data for Fallback ---
+                        let productMap = {};
+                        try {
+                            const nextDataScript = $('#__NEXT_DATA__').html();
+                            if (nextDataScript) {
+                                const nextData = JSON.parse(nextDataScript);
+
+                                // Helper to recursively find "hits" or products array
+                                const findHits = (obj, depth = 0) => {
+                                    if (!obj || depth > 5) return [];
+                                    if (Array.isArray(obj)) return obj; // If it's already an array, check it
+                                    if (obj.hits && Array.isArray(obj.hits)) return obj.hits;
+                                    if (obj.products && Array.isArray(obj.products)) return obj.products;
+
+                                    // Should be in props.pageProps.catalog.hits usually
+                                    for (const key in obj) {
+                                        if (typeof obj[key] === 'object') {
+                                            const found = findHits(obj[key], depth + 1);
+                                            if (found && found.length > 0) return found;
+                                        }
+                                    }
+                                    return [];
+                                };
+
+                                // Try standard path first for speed
+                                let hits = nextData?.props?.pageProps?.catalog?.hits ||
+                                    nextData?.props?.pageProps?.initialData?.catalog?.hits;
+
+                                // If not found, search
+                                if (!hits || hits.length === 0) {
+                                    hits = findHits(nextData?.props?.pageProps);
+                                }
+
+                                if (hits && Array.isArray(hits)) {
+                                    crawlerLog.info(`🔍 [HTML] Found ${hits.length} products in hidden JSON data`);
+                                    hits.forEach(hit => {
+                                        if (hit.sku || hit.product_code) {
+                                            productMap[hit.sku || hit.product_code] = hit;
+                                        }
+                                    });
+                                }
+                            }
+                        } catch (e) {
+                            crawlerLog.debug(`[HTML] Failed to parse JSON data: ${e.message}`);
+                        }
 
                         // Try multiple selectors for product containers
                         const productSelectors = [
@@ -723,7 +802,8 @@ async function main() {
                         $products.each((_, productEl) => {
                             if (saved >= MAX_PRODUCTS) return false;
 
-                            const productData = extractProductData($, productEl, request.url);
+                            // Pass productMap to extraction function
+                            const productData = extractProductData($, productEl, request.url, productMap);
                             if (productData && validateProduct(productData)) {
                                 productsToSave.push(productData);
                             }
