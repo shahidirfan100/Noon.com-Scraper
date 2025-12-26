@@ -604,12 +604,13 @@ async function main() {
 
                         // HTML pagination
                         if (saved < MAX_PRODUCTS && pageCount < MAX_PAGES) {
+                            const isProductLink = (href) => href && /\/p\//i.test(href);
                             // Look for next page link
                             const nextPageLink = $('a[aria-label*="next"]').first().attr('href') ||
                                                $('a[class*="next"]').first().attr('href') ||
                                                $(`a:contains("${currentPage + 1}")`).first().attr('href');
                             
-                            if (nextPageLink) {
+                            if (nextPageLink && !isProductLink(nextPageLink)) {
                                 const nextUrl = toAbs(nextPageLink, request.url);
                                 await crawler.addRequests([{
                                     url: nextUrl,
@@ -619,7 +620,16 @@ async function main() {
                             } else {
                                 // Try constructing next page URL
                                 const nextUrl = new URL(request.url);
+                                if (isProductLink(nextUrl.pathname)) {
+                                    const parts = nextUrl.pathname.split('/').filter(Boolean);
+                                    const pIndex = parts.findIndex((p) => p.toLowerCase() === 'p');
+                                    const listParts = pIndex > 0 ? parts.slice(0, pIndex) : parts;
+                                    nextUrl.pathname = `/${listParts.join('/')}/`;
+                                }
                                 nextUrl.searchParams.set('page', String(currentPage + 1));
+                                if (!nextUrl.searchParams.has('limit')) {
+                                    nextUrl.searchParams.set('limit', '50');
+                                }
                                 
                                 await crawler.addRequests([{
                                     url: nextUrl.href,
