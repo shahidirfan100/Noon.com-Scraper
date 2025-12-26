@@ -436,54 +436,79 @@ async function main() {
                     }
                 });
 
-                // Description - try multiple sources
+                // Description - try multiple sources (user-provided selector first)
                 const metaDescription = cleanText(
                     $('meta[name="description"]').attr('content') ||
                     $('meta[property="og:description"]').attr('content')
                 );
 
                 const description = cleanText(
+                    $('div.OverviewTab-module-scss-module__NTeOuq__container').text() ||
                     $('[data-qa*="overview"]').text() ||
                     $('#OverviewArea + div').text() ||
-                    $('[class*="ProductOverview"]').text() ||
+                    $('[class*="OverviewTab"]').text() ||
                     metaDescription ||
                     ldDescription
                 ) || product.description;
 
-                // Brand - try multiple selectors including href-based
+                // Brand - use exact user-provided selector first
                 const brand = cleanText(
+                    $('div.BrandStoreCtaV2-module-scss-module___vJ0Tq__brandAndVariantsButton').text() ||
+                    $('[class*="BrandStoreCtaV2"]').first().text() ||
                     $('a[href*="/brand/"]').first().text() ||
                     $('[data-qa*="brand"]').first().text() ||
-                    $('[class*="brandStore"] a, [class*="BrandStore"] a').first().text() ||
                     ldBrand
                 ) || product.brand;
 
-                // Rating - from page text or JSON-LD
-                const pageText = $('body').text();
-                const ratingMatch = pageText.match(/\b([1-5]\.\d)\s*(?:out of 5|\/5|\s*stars?)?/i);
-                const rating = ldRating || (ratingMatch ? parseFloat(ratingMatch[1]) : null) || product.rating;
+                // Rating - use exact user-provided selector first
+                const ratingElement = $('div.RatingPreviewStarV2-module-scss-module__0_8vQW__starsCtr');
+                let rating = null;
+                if (ratingElement.length) {
+                    const ratingText = ratingElement.text();
+                    const ratingMatch = ratingText.match(/([1-5]\.?\d?)/);
+                    if (ratingMatch) rating = parseFloat(ratingMatch[1]);
+                }
+                if (!rating && ldRating) rating = ldRating;
+                if (!rating) {
+                    // Fallback to regex on page text
+                    const pageText = $('body').text();
+                    const fallbackMatch = pageText.match(/\b([1-5]\.\d)\s*(?:out of 5|\/5|\s*stars?)?/i);
+                    if (fallbackMatch) rating = parseFloat(fallbackMatch[1]);
+                }
+                rating = rating || product.rating;
 
-                // Reviews count - from page text or JSON-LD
-                const reviewsPatterns = [
-                    /(\d+(?:,\d+)*)\s*(?:ratings?|reviews?)/i,
-                    /\((\d+(?:,\d+)*)\)/,
-                    /(\d+(?:\.\d+)?K?)\s*(?:ratings?|reviews?)/i
-                ];
-                let reviewsCount = ldReviews || product.reviewsCount;
+                // Reviews count - use exact user-provided selector first
+                const reviewsElement = $('div.RatingPreviewStarV2-module-scss-module__0_8vQW__ratingsCountCtr');
+                let reviewsCount = null;
+                if (reviewsElement.length) {
+                    const reviewsText = reviewsElement.text();
+                    const reviewsMatch = reviewsText.match(/(\d+(?:,\d+)*(?:\.\d+)?K?)/i);
+                    if (reviewsMatch) {
+                        const reviewStr = reviewsMatch[1];
+                        if (reviewStr.toUpperCase().includes('K')) {
+                            reviewsCount = Math.round(parseFloat(reviewStr.replace(/K/i, '')) * 1000);
+                        } else {
+                            reviewsCount = parseInt(reviewStr.replace(/,/g, ''));
+                        }
+                    }
+                }
+                if (!reviewsCount && ldReviews) reviewsCount = ldReviews;
                 if (!reviewsCount) {
-                    for (const pattern of reviewsPatterns) {
+                    // Fallback to regex on page text
+                    const pageText = $('body').text();
+                    const patterns = [
+                        /(\d+(?:,\d+)*)\s*(?:ratings?|reviews?)/i,
+                        /\((\d+(?:,\d+)*)\)/
+                    ];
+                    for (const pattern of patterns) {
                         const match = pageText.match(pattern);
                         if (match) {
-                            const reviewStr = match[1];
-                            if (reviewStr.toUpperCase().includes('K')) {
-                                reviewsCount = Math.round(parseFloat(reviewStr.replace(/K/i, '')) * 1000);
-                            } else {
-                                reviewsCount = parseInt(reviewStr.replace(/,/g, ''));
-                            }
+                            reviewsCount = parseInt(match[1].replace(/,/g, ''));
                             break;
                         }
                     }
                 }
+                reviewsCount = reviewsCount || product.reviewsCount;
 
                 return {
                     ...product,
