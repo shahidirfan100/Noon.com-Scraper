@@ -589,13 +589,24 @@ async function main() {
                 }
             },
             
-            // Enhanced error handling
-            failedRequestHandler({ request, error }, { log: crawlerLog }) {
-                crawlerLog.error(`❌ Request failed: ${request.url}`);
-                crawlerLog.error(`Error: ${error.message}`);
+            // Enhanced error handling (Crawlee passes error as 2nd argument)
+            failedRequestHandler({ request, log: ctxLog, session }, error) {
+                const logger = ctxLog || log;
+                const message = error?.message || 'Unknown error';
+                const status = error?.statusCode || error?.response?.statusCode;
+
+                logger.error(`❌ Request failed${status ? ` (${status})` : ''}: ${request.url}`);
+                logger.error(`Error: ${message}`);
+
+                // Rotate session on hard blocks
+                if (status === 403 && session?.retire) {
+                    session.retire();
+                }
+
                 errors.push({
                     url: request.url,
-                    error: error.message,
+                    error: message,
+                    statusCode: status ?? null,
                     page: request.userData?.page || 'unknown',
                 });
             },
