@@ -474,8 +474,48 @@ async function main() {
                     $('meta[property="og:description"]').attr('content')
                 );
 
-                // Description container - some products have text, others only have specs table
+                // Try to find data in script tags (Next.js data often in self.__next_f or similar)
+                let scriptData = {
+                    rating: null,
+                    reviews: null,
+                    description: null,
+                    brand: null
+                };
+
+                $('script').each((_, el) => {
+                    const text = $(el).html();
+                    if (!text) return;
+
+                    // Extract rating from JSON in scripts (e.g. "brand_rating":{"value":4.3})
+                    if (!scriptData.rating) {
+                        const rateMatch = text.match(/"brand_rating":\s*\{\s*"value":\s*([0-9.]+)/);
+                        if (rateMatch) scriptData.rating = parseFloat(rateMatch[1]);
+                    }
+
+                    // Extract reviews count
+                    if (!scriptData.reviews) {
+                        const revMatch = text.match(/"rating_count":\s*([0-9]+)/) ||
+                            text.match(/"review_count":\s*([0-9]+)/) ||
+                            text.match(/"count":\s*([0-9]+),\s*"average"/); // common pattern
+                        if (revMatch) scriptData.reviews = parseInt(revMatch[1]);
+                    }
+
+                    // Extract description
+                    if (!scriptData.description) {
+                        const descMatch = text.match(/"long_description":\s*"([^"]+)"/);
+                        if (descMatch) scriptData.description = cleanText(descMatch[1].replace(/\\"/g, '"'));
+                    }
+
+                    // Extract brand
+                    if (!scriptData.brand) {
+                        const brandMatch = text.match(/"brand":\s*\{\s*"code":\s*"[^"]+",\s*"name":\s*"([^"]+)"/);
+                        if (brandMatch) scriptData.brand = cleanText(brandMatch[1]);
+                    }
+                });
+
+                // Description container - fallback chain
                 const description = cleanText(
+                    scriptData.description || // Script data priority
                     $('div.OverviewTab-module-scss-module__NTeOuq__container').text() ||
                     $('[class*="OverviewTab"][class*="container"]').text() ||
                     $('#OverviewArea').text() ||
@@ -486,6 +526,7 @@ async function main() {
 
                 // Brand - use exact user-provided selector with textContent child
                 const brand = cleanText(
+                    scriptData.brand || // Script data priority
                     $('div.BrandStoreCtaV2-module-scss-module___vJ0Tq__brandAndVariantsButton [class*="textContent"]').text() ||
                     $('[class*="BrandStoreCtaV2"] [class*="textContent"]').first().text() ||
                     $('a.BrandStoreCtaV2-module-scss-module___vJ0Tq__brandStoreLink').first().text() ||
@@ -502,6 +543,7 @@ async function main() {
                     const ratingMatch = ratingText.match(/([1-5]\.?\d?)/);
                     if (ratingMatch) rating = parseFloat(ratingMatch[1]);
                 }
+                if (!rating && scriptData.rating) rating = scriptData.rating; // Script data fallback
                 if (!rating && ldRating) rating = ldRating;
                 if (!rating) {
                     // Fallback to searching in page text
@@ -515,10 +557,12 @@ async function main() {
                 let reviewsCount = null;
                 const pageText = $('body').text();
 
-                // Try to find "Based on X ratings" pattern first (most reliable)
+                // Try to find "Based on X ratings" pattern first (most reliable DOM pattern)
                 const basedOnMatch = pageText.match(/Based on ([\d,]+)\s*(?:ratings?|reviews?)/i);
                 if (basedOnMatch) {
                     reviewsCount = parseInt(basedOnMatch[1].replace(/,/g, ''));
+                } else if (scriptData.reviews) {
+                    reviewsCount = scriptData.reviews; // Script data fallback
                 } else {
                     // Fallback to other patterns
                     const reviewsElement = $('div.RatingPreviewStarV2-module-scss-module__0_8vQW__ratingsCountCtr');
