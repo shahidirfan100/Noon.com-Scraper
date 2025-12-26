@@ -1,0 +1,64 @@
+{
+  "actorSpecification": 1,
+  "fields": {},
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "description": "Product listing with key details",
+      "transformation": {
+        "fields": [
+          "image",
+          "title",
+          "brand",
+          "currentPrice",
+          "originalPrice",
+          "discount",
+          "rating",
+          "reviewsCount",
+          "url"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "image": {
+            "label": "Image",
+            "format": "image"
+          },
+          "title": {
+            "label": "Product Title",
+            "format": "text"
+          },
+          "brand": {
+            "label": "Brand",
+            "format": "text"
+          },
+          "currentPrice": {
+            "label": "Current Price (AED)",
+            "format": "number"
+          },
+          "originalPrice": {
+            "label": "Original Price (AED)",
+            "format": "number"
+          },
+          "discount": {
+            "label": "Discount",
+            "format": "text"
+          },
+          "rating": {
+            "label": "Rating",
+            "format": "number"
+          },
+          "reviewsCount": {
+            "label": "Reviews",
+            "format": "number"
+          },
+          "url": {
+            "label": "Product URL",
+            "format": "link"
+          }
+        }
+      }
+    }
+  }
+}

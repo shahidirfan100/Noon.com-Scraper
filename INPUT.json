@@ -1,0 +1,9 @@
+{
+  "startUrl": "https://www.noon.com/uae-en/fashion/men-31225/crazy-price-drops-ae-FA_03/",
+  "maxProducts": 50,
+  "maxPages": 5,
+  "proxyConfiguration": {
+    "useApifyProxy": true,
+    "apifyProxyGroups": ["RESIDENTIAL"]
+  }
+}

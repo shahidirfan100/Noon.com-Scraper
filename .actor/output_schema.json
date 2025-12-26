@@ -1,0 +1,19 @@
+{
+    "actorOutputSchemaVersion": 1,
+    "title": "Noon.com Product Scraper Output",
+    "description": "Structured product data extracted from Noon.com",
+    "properties": {
+        "products": {
+            "type": "string",
+            "title": "Products Dataset",
+            "description": "Complete dataset of scraped products with all details",
+            "template": "{{links.apiDefaultDatasetUrl}}/items?view=overview"
+        },
+        "datasetUrl": {
+            "type": "string",
+            "title": "Full Dataset API",
+            "description": "Raw API access to complete dataset",
+            "template": "{{links.apiDefaultDatasetUrl}}/items"
+        }
+    }
+}
