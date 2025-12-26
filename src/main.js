@@ -530,10 +530,45 @@ async function main() {
                         if (revMatch) scriptData.reviews = parseInt(revMatch[1]);
                     }
 
-                    // Extract description
+                    // Extract description - improved regex to handle escaped quotes
                     if (!scriptData.description) {
-                        const descMatch = text.match(/"long_description":\s*"([^"]+)"/);
-                        if (descMatch) scriptData.description = cleanText(descMatch[1].replace(/\\"/g, '"'));
+                        const descMatch = text.match(/"long_description":\s*"((?:[^"\\]|\\.)*)"/);
+                        if (descMatch) scriptData.description = cleanText(descMatch[1].replace(/\\"/g, '"').replace(/\\n/g, '<br>'));
+                    }
+
+                    // Extract feature bullets (Highlights)
+                    if (!scriptData.feature_bullets) {
+                        const bullyMatch = text.match(/"feature_bullets":\s*(\[[^\]]+\])/);
+                        if (bullyMatch) {
+                            try {
+                                // Try to parse the array (might need unescaping)
+                                const rawArr = bullyMatch[1].replace(/\\"/g, '"');
+                                const bullets = JSON.parse(rawArr);
+                                if (Array.isArray(bullets) && bullets.length > 0) {
+                                    scriptData.feature_bullets = '<ul>' + bullets.map(b => `<li>${b}</li>`).join('') + '</ul>';
+                                }
+                            } catch (e) {
+                                // simple fallback if parse fails
+                                scriptData.feature_bullets = null;
+                            }
+                        }
+                    }
+
+                    // Extract specifications for basic table
+                    if (!scriptData.specifications) {
+                        const specMatch = text.match(/"specifications":\s*(\[[^\]]+\])/);
+                        if (specMatch) {
+                            try {
+                                const rawSpec = specMatch[1].replace(/\\"/g, '"');
+                                const specs = JSON.parse(rawSpec);
+                                if (Array.isArray(specs) && specs.length > 0) {
+                                    const rows = specs.map(s => `<tr><td><strong>${s.name}</strong></td><td>${s.value}</td></tr>`).join('');
+                                    scriptData.specifications = `<table class="spec-table">${rows}</table>`;
+                                }
+                            } catch (e) {
+                                scriptData.specifications = null;
+                            }
+                        }
                     }
 
                     // Extract brand
@@ -544,8 +579,11 @@ async function main() {
                 });
 
                 // Description container - fallback chain
+                // Priority: Script Description > Script Highlights > Script Specs > DOM Selectors
                 const description = cleanText(
-                    scriptData.description || // Script data priority
+                    scriptData.description ||
+                    (scriptData.feature_bullets ? `<h3>Highlights</h3>${scriptData.feature_bullets}` : null) ||
+                    (scriptData.specifications ? `<h3>Specifications</h3>${scriptData.specifications}` : null) ||
                     $('div.OverviewTab-module-scss-module__NTeOuq__container').text() ||
                     $('[class*="OverviewTab"][class*="container"]').text() ||
                     $('#OverviewArea').text() ||
