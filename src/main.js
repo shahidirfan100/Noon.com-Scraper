@@ -90,7 +90,7 @@ async function main() {
         // ==========================================
         // API-BASED SCRAPING (PRIMARY METHOD)
         // ==========================================
-        
+
         /**
          * Extract product data from API response
          * Noon.com uses GraphQL/REST API for product listings
@@ -103,8 +103,8 @@ async function main() {
                 }
 
                 const sku = product.sku || product.product_code || product.id;
-                const url = product.url || product.product_url || 
-                           (sku ? `https://www.noon.com/uae-en/p/${sku}` : null);
+                const url = product.url || product.product_url ||
+                    (sku ? `https://www.noon.com/uae-en/p/${sku}` : null);
 
                 return {
                     title: cleanText(product.name || product.title || product.product_name),
@@ -134,16 +134,16 @@ async function main() {
         async function fetchProductsViaAPI(catalogUrl, page = 1) {
             try {
                 log.info(`[API] Attempting to fetch products from API - Page ${page}`);
-                
+
                 // Parse catalog URL to extract parameters
                 const urlObj = new URL(catalogUrl);
                 const pathParts = urlObj.pathname.split('/').filter(Boolean);
-                
+
                 // Extract catalog/category info from URL
                 // Example: /uae-en/fashion/men-31225/crazy-price-drops-ae-FA_03/
                 const lang = pathParts[0] || 'uae-en';
                 const category = pathParts[pathParts.length - 2] || '';
-                
+
                 // Generate realistic headers
                 const headers = headerGenerator.getHeaders({
                     httpVersion: '2',
@@ -166,7 +166,7 @@ async function main() {
                 for (const apiUrl of apiEndpoints) {
                     try {
                         log.info(`[API] Trying endpoint: ${apiUrl}`);
-                        
+
                         const response = await gotScraping({
                             url: apiUrl,
                             method: 'GET',
@@ -194,11 +194,11 @@ async function main() {
 
                         if (response.body && typeof response.body === 'object') {
                             log.info(`[API] Success! Got response from: ${apiUrl}`);
-                            
+
                             // Try to extract products from various response structures
                             let products = [];
                             const data = response.body;
-                            
+
                             // Common API response structures
                             if (data.products && Array.isArray(data.products)) {
                                 products = data.products;
@@ -214,14 +214,14 @@ async function main() {
 
                             if (products.length > 0) {
                                 log.info(`[API] Extracted ${products.length} products from API`);
-                                
+
                                 // Extract pagination info
                                 const pagination = {
                                     hasNext: false,
                                     totalPages: data.total_pages || data.totalPages || MAX_PAGES,
                                     currentPage: page,
                                 };
-                                
+
                                 if (data.pagination) {
                                     pagination.hasNext = data.pagination.has_next || page < pagination.totalPages;
                                 } else if (data.next || data.nextPage) {
@@ -253,83 +253,96 @@ async function main() {
         // ==========================================
         // HTML PARSING (FALLBACK METHOD)
         // ==========================================
-        
+
         function extractProductData($, productElement, baseUrl) {
             try {
                 const $product = $(productElement);
-                
-                // Product URL
+
+                // Product URL - use the main product link
                 const productLink = $product.find('a[href*="/p/"]').first();
                 const productUrl = productLink.attr('href');
                 const fullUrl = productUrl ? toAbs(productUrl, baseUrl) : null;
-                
+
                 if (!fullUrl) return null;
-                
-                // Product Title
+
+                // Product Title - use data-qa selector (Noon uses plp-product-box-name)
                 const title = cleanText(
-                    $product.find('[data-qa="product-name"]').text() ||
-                    $product.find('[class*="title"]').text() ||
-                    $product.find('h2, h3').first().text() ||
+                    $product.find('[data-qa="plp-product-box-name"]').text() ||
+                    $product.find('h2').first().text() ||
+                    $product.find('[class*="productTitle"]').text() ||
                     productLink.attr('title')
                 );
-                
+
                 if (!title) return null;
-                
-                // Product Image
-                const imageElement = $product.find('img').first();
-                const image = imageElement.attr('src') || 
-                            imageElement.attr('data-src') || 
-                            imageElement.attr('srcset')?.split(' ')[0] || null;
-                
-                // Price information
-                const currentPriceText = $product.find('[class*="sellingPrice"], [class*="price"]').first().text();
-                const originalPriceText = $product.find('[class*="oldPrice"], [class*="wasPrice"]').first().text();
-                const discountText = $product.find('[class*="discount"], [class*="OFF"]').first().text();
-                
+
+                // Product Image - use data-qa selector
+                const imageElement = $product.find('[data-qa^="productImagePLP"] img, img[src*="nooncdn"], img').first();
+                const image = imageElement.attr('src') ||
+                    imageElement.attr('data-src') ||
+                    imageElement.attr('srcset')?.split(' ')[0] || null;
+
+                // Price information - use data-qa selector
+                const priceContainer = $product.find('[data-qa="plp-product-box-price"]');
+                const currentPriceText = priceContainer.find('strong').first().text() || priceContainer.text();
+                const originalPriceText = priceContainer.find('span').first().text();
+                const discountText = $product.find('[class*="discount"], [data-qa*="discount"], [class*="OFF"]').first().text();
+
                 const currentPrice = cleanPrice(currentPriceText);
                 const originalPrice = cleanPrice(originalPriceText);
                 const discount = discountText ? cleanText(discountText) : null;
-                
-                // Rating
-                const ratingNode = $product.find('[data-qa*="rating"], [aria-label*="rating"], [class*="rating"]').first();
-                const ratingText = cleanText(
-                    ratingNode.attr('aria-label') ||
-                    ratingNode.attr('data-rating') ||
-                    ratingNode.text()
+
+                // Rating & Reviews - extract from product box text using regex patterns
+                // Noon displays rating like "4.3" and reviews like "(43)" or "43 Ratings"
+                const productBoxText = $product.text();
+
+                // Extract rating (e.g., "4.3" or "4.5")
+                const ratingMatch = productBoxText.match(/\b([1-5]\.\d)\b/);
+                const rating = ratingMatch ? parseFloat(ratingMatch[1]) : null;
+
+                // Extract reviews count (e.g., "(43)" or "43 Ratings" or "(1.2K)")
+                const reviewsMatch = productBoxText.match(/\((\d+(?:,\d+)*(?:\.\d+)?K?)\)|([\d,]+)\s*(?:Ratings?|Reviews?)/i);
+                let reviewsCount = null;
+                if (reviewsMatch) {
+                    const reviewStr = reviewsMatch[1] || reviewsMatch[2];
+                    if (reviewStr.toUpperCase().includes('K')) {
+                        reviewsCount = Math.round(parseFloat(reviewStr.replace(/K/i, '')) * 1000);
+                    } else {
+                        reviewsCount = parseInt(reviewStr.replace(/,/g, ''));
+                    }
+                }
+
+                // Brand - extract from data-qa or title
+                let brand = cleanText(
+                    $product.find('[data-qa*="brand"], a[href*="/brand/"]').first().text()
                 );
-                const rating = ratingText ? parseFloat((ratingText.match(/[0-9.]+/) || [])[0]) : null;
-                
-                // Reviews count
-                const reviewsNode = $product.find('[class*="reviews"], [class*="rating"], [aria-label*="review"], [data-qa*="review"]').first();
-                const reviewsText = cleanText(
-                    reviewsNode.attr('aria-label') ||
-                    reviewsNode.attr('data-review-count') ||
-                    reviewsNode.text() ||
-                    ratingText
-                );
-                const reviewsMatch = reviewsText.match(/\d{1,3}(?:,\d{3})*/);
-                const reviews = reviewsMatch ? parseInt(reviewsMatch[0].replace(/,/g, '')) : null;
-                
-                // Brand
-                const brand = cleanText(
-                    $product.find('[data-qa*="brand"], [class*="brand"], a[href*="brand"]').first().text()
-                ) || null;
-                
-                // Product SKU/ID from URL
-                const skuMatch = fullUrl ? fullUrl.match(/\/([A-Z0-9]+)\/p\//) : null;
+
+                // If no brand found, try to extract from title (first word if it looks like a brand)
+                if (!brand && title) {
+                    const titleParts = title.split(' ');
+                    if (titleParts.length > 1) {
+                        const possibleBrand = titleParts[0];
+                        // Brand is usually capitalized or all caps
+                        if (possibleBrand.length >= 2 && /^[A-Z]/.test(possibleBrand)) {
+                            brand = possibleBrand;
+                        }
+                    }
+                }
+
+                // Product SKU/ID from URL - improved regex
+                const skuMatch = fullUrl ? fullUrl.match(/\/([A-Z0-9]+)(?:\/p\/|\?|$)/i) : null;
                 const sku = skuMatch ? skuMatch[1] : null;
 
                 return {
                     title: title,
                     url: fullUrl,
                     image: image,
-                    brand: brand,
+                    brand: brand || null,
                     description: null, // filled via detail page enrichment if available
                     currentPrice: currentPrice,
                     originalPrice: originalPrice,
                     discount: discount,
                     rating: rating,
-                    reviewsCount: reviews,
+                    reviewsCount: reviewsCount,
                     sku: sku,
                     currency: 'AED',
                     scrapedAt: new Date().toISOString(),
@@ -345,7 +358,7 @@ async function main() {
          */
         function validateProduct(product) {
             if (!product) return false;
-            
+
             // Required fields
             if (!product.title || !product.url) {
                 log.warning(`⚠️ Invalid product: missing required fields (title or url)`);
@@ -392,7 +405,7 @@ async function main() {
 
                 const $ = loadHtml(resp.body);
 
-                // Try structured data first (JSON-LD)
+                // Try structured data first (JSON-LD) - most reliable source
                 let ldDescription = null;
                 let ldBrand = null;
                 let ldRating = null;
@@ -414,8 +427,8 @@ async function main() {
                             }
                             const agg = node.aggregateRating || node?.mainEntity?.aggregateRating;
                             if (agg) {
-                                ldRating = ldRating || agg.ratingValue || agg.rating;
-                                ldReviews = ldReviews || agg.reviewCount || agg.ratingCount;
+                                ldRating = ldRating || parseFloat(agg.ratingValue || agg.rating);
+                                ldReviews = ldReviews || parseInt(agg.reviewCount || agg.ratingCount);
                             }
                         }
                     } catch {
@@ -423,41 +436,54 @@ async function main() {
                     }
                 });
 
+                // Description - try multiple sources
                 const metaDescription = cleanText(
                     $('meta[name="description"]').attr('content') ||
                     $('meta[property="og:description"]').attr('content')
                 );
 
                 const description = cleanText(
-                    $('.OverviewTab-module-scss-module__NTeOuq__row').text() ||
                     $('[data-qa*="overview"]').text() ||
-                    $('section:contains("Overview")').text() ||
+                    $('#OverviewArea + div').text() ||
+                    $('[class*="ProductOverview"]').text() ||
                     metaDescription ||
                     ldDescription
                 ) || product.description;
 
+                // Brand - try multiple selectors including href-based
                 const brand = cleanText(
-                    $('span.BrandStoreCtaV2-module-scss-module___vJ0Tq__textContent.BrandStoreCtaV2-module-scss-module___vJ0Tq__brandStoreText').text() ||
-                    $('a[aria-label*="brand"], a[href*="brand"] span').first().text() ||
+                    $('a[href*="/brand/"]').first().text() ||
+                    $('[data-qa*="brand"]').first().text() ||
+                    $('[class*="brandStore"] a, [class*="BrandStore"] a').first().text() ||
                     ldBrand
                 ) || product.brand;
 
-                const ratingText = cleanText(
-                    $('div.NoonRatings-module-scss-module__ABB9HW__overallRating').first().text() ||
-                    $('[data-qa*="rating"]').first().text() ||
-                    $('[aria-label*="rating"]').first().text() ||
-                    String(ldRating || '')
-                );
-                const rating = ratingText ? parseFloat((ratingText.match(/[0-9.]+/) || [])[0]) : product.rating;
+                // Rating - from page text or JSON-LD
+                const pageText = $('body').text();
+                const ratingMatch = pageText.match(/\b([1-5]\.\d)\s*(?:out of 5|\/5|\s*stars?)?/i);
+                const rating = ldRating || (ratingMatch ? parseFloat(ratingMatch[1]) : null) || product.rating;
 
-                const reviewsText = cleanText(
-                    $('div.ProductReviewsFilters-module-scss-module__hOBdza__reviewTopicInner').first().text() ||
-                    $('[data-qa*="reviews"]').first().text() ||
-                    $('[aria-label*="review"]').first().text() ||
-                    String(ldReviews || '')
-                );
-                const reviewsMatch = reviewsText.match(/\d{1,3}(?:,\d{3})*/);
-                const reviewsCount = reviewsMatch ? parseInt(reviewsMatch[0].replace(/,/g, '')) : product.reviewsCount;
+                // Reviews count - from page text or JSON-LD
+                const reviewsPatterns = [
+                    /(\d+(?:,\d+)*)\s*(?:ratings?|reviews?)/i,
+                    /\((\d+(?:,\d+)*)\)/,
+                    /(\d+(?:\.\d+)?K?)\s*(?:ratings?|reviews?)/i
+                ];
+                let reviewsCount = ldReviews || product.reviewsCount;
+                if (!reviewsCount) {
+                    for (const pattern of reviewsPatterns) {
+                        const match = pageText.match(pattern);
+                        if (match) {
+                            const reviewStr = match[1];
+                            if (reviewStr.toUpperCase().includes('K')) {
+                                reviewsCount = Math.round(parseFloat(reviewStr.replace(/K/i, '')) * 1000);
+                            } else {
+                                reviewsCount = parseInt(reviewStr.replace(/,/g, ''));
+                            }
+                            break;
+                        }
+                    }
+                }
 
                 return {
                     ...product,
@@ -492,10 +518,10 @@ async function main() {
             minConcurrency: 2,
             requestHandlerTimeoutSecs: 120,
             navigationTimeoutSecs: 60,
-            
+
             // Add moderate rate limit for stealth
             maxRequestsPerMinute: 60,
-            
+
             // Pre-navigation hook to add stealth headers
             preNavigationHooks: [
                 async ({ request, session }, gotoOptions) => {
@@ -503,7 +529,7 @@ async function main() {
                         httpVersion: '2',
                         locales: ['en-US', 'en-AE'],
                     });
-                    
+
                     gotoOptions.headers = {
                         ...gotoOptions.headers,
                         ...stealthHeaders,
@@ -517,7 +543,7 @@ async function main() {
                     };
                 },
             ],
-            
+
             async requestHandler({ request, $, crawler, log: crawlerLog }) {
                 const label = request.userData?.label || 'LIST';
                 const currentPage = request.userData?.page || 1;
@@ -527,47 +553,47 @@ async function main() {
                     crawlerLog.info(`📄 Processing page ${currentPage} (${pageCount}/${MAX_PAGES}): ${request.url}`);
 
                     let productsToSave = [];
-                    
+
                     // ========================================
                     // STEP 1: Try API first (PRIMARY METHOD)
                     // ========================================
                     const apiResult = await fetchProductsViaAPI(request.url, currentPage);
-                    
+
                     if (apiResult.success && apiResult.products.length > 0) {
                         crawlerLog.info(`✅ [API] Successfully fetched ${apiResult.products.length} products from API`);
                         productsToSave = apiResult.products;
-                        
+
                         // Queue next page if available
                         if (apiResult.pagination.hasNext && pageCount < MAX_PAGES && saved < MAX_PRODUCTS) {
                             const nextPageNum = currentPage + 1;
                             const nextUrl = new URL(request.url);
                             nextUrl.searchParams.set('page', String(nextPageNum));
-                            
+
                             await crawler.addRequests([{
                                 url: nextUrl.href,
                                 userData: { label: 'LIST', page: nextPageNum },
                             }]);
-                            
+
                             crawlerLog.info(`➡️ [API] Queued next page: ${nextPageNum}`);
                         }
-                    } 
+                    }
                     // ========================================
                     // STEP 2: Fallback to HTML parsing
                     // ========================================
                     else {
                         crawlerLog.warning('⚠️ [API] Failed, falling back to HTML parsing');
-                        
+
                         // Try multiple selectors for product containers
                         const productSelectors = [
-                            '[data-qa="product-box"]',
-                            '[data-qa*="product"]',
-                            '[class*="productContainer"]',
+                            '[data-qa="plp-product-box"]',  // Primary: Noon's main product box container
+                            '[data-qa*="product-box"]',      // Fallback: any product box variant
+                            '[data-qa*="product"]',          // Fallback: any product element
                             '[class*="ProductCard"]',
-                            '[class*="product-card"]',
+                            '[class*="productContainer"]',
                             'div[class*="sc-"] a[href*="/p/"]',
                             'article[class*="product"]',
                         ];
-                        
+
                         let $products = null;
                         for (const selector of productSelectors) {
                             const found = $(selector);
@@ -577,11 +603,11 @@ async function main() {
                                 break;
                             }
                         }
-                        
+
                         if (!$products || $products.length === 0) {
                             crawlerLog.error(`❌ No products found on ${request.url}`);
                             crawlerLog.error(`Page content sample: ${$.html().substring(0, 500)}`);
-                            
+
                             // Check if we hit a block/captcha page
                             const bodyText = $('body').text().toLowerCase();
                             if (bodyText.includes('captcha') || bodyText.includes('blocked')) {
@@ -595,7 +621,7 @@ async function main() {
 
                         $products.each((_, productEl) => {
                             if (saved >= MAX_PRODUCTS) return false;
-                            
+
                             const productData = extractProductData($, productEl, request.url);
                             if (productData && validateProduct(productData)) {
                                 productsToSave.push(productData);
@@ -607,9 +633,9 @@ async function main() {
                             const isProductLink = (href) => href && /\/p\//i.test(href);
                             // Look for next page link
                             const nextPageLink = $('a[aria-label*="next"]').first().attr('href') ||
-                                               $('a[class*="next"]').first().attr('href') ||
-                                               $(`a:contains("${currentPage + 1}")`).first().attr('href');
-                            
+                                $('a[class*="next"]').first().attr('href') ||
+                                $(`a:contains("${currentPage + 1}")`).first().attr('href');
+
                             if (nextPageLink && !isProductLink(nextPageLink)) {
                                 const nextUrl = toAbs(nextPageLink, request.url);
                                 await crawler.addRequests([{
@@ -630,12 +656,12 @@ async function main() {
                                 if (!nextUrl.searchParams.has('limit')) {
                                     nextUrl.searchParams.set('limit', '50');
                                 }
-                                
+
                                 await crawler.addRequests([{
                                     url: nextUrl.href,
                                     userData: { label: 'LIST', page: currentPage + 1 },
                                 }]);
-                                
+
                                 crawlerLog.info(`➡️ [HTML] Constructed next page URL: ${nextUrl.href}`);
                             }
                         }
@@ -666,7 +692,7 @@ async function main() {
                             await flushBuffer();
                             saved += enrichedProducts.length;
                             crawlerLog.info(`💾 Saved ${enrichedProducts.length} products (Total: ${saved}/${MAX_PRODUCTS})`);
-                            
+
                             // Log sample product for verification
                             crawlerLog.debug(`Sample product: ${JSON.stringify(enrichedProducts[0], null, 2)}`);
                         }
@@ -678,7 +704,7 @@ async function main() {
                     await new Promise(resolve => setTimeout(resolve, 250 + Math.random() * 750));
                 }
             },
-            
+
             // Enhanced error handling (Crawlee passes error as 2nd argument)
             failedRequestHandler({ request, log: ctxLog, session }, error) {
                 const logger = ctxLog || log;
@@ -704,13 +730,13 @@ async function main() {
 
         // Start crawling
         log.info('🚀 Starting crawler...');
-        await crawler.run(initial.map((u, idx) => ({ 
-            url: u, 
+        await crawler.run(initial.map((u, idx) => ({
+            url: u,
             userData: { label: 'LIST', page: 1 },
             uniqueKey: `start-${idx}`,
         })));
         await flushBuffer(true);
-        
+
         // ==========================================
         // FINAL SUMMARY
         // ==========================================
@@ -720,7 +746,7 @@ async function main() {
         log.info(`✅ Total products saved: ${saved}/${MAX_PRODUCTS}`);
         log.info(`📄 Total pages processed: ${pageCount}/${MAX_PAGES}`);
         log.info(`❌ Total errors: ${errors.length}`);
-        
+
         if (errors.length > 0) {
             log.warning('⚠️ Errors encountered:');
             errors.slice(0, 5).forEach(err => {
@@ -730,7 +756,7 @@ async function main() {
                 log.warning(`  ... and ${errors.length - 5} more errors`);
             }
         }
-        
+
         if (saved === 0) {
             log.error('🚨 NO PRODUCTS SAVED! Check errors above.');
         } else if (saved < MAX_PRODUCTS / 2) {
@@ -738,9 +764,9 @@ async function main() {
         } else {
             log.info('✅ Scraping completed successfully!');
         }
-        
+
         log.info('='.repeat(60));
-        
+
     } catch (error) {
         log.exception(error, 'Fatal error in main function');
         throw error;
@@ -749,7 +775,7 @@ async function main() {
     }
 }
 
-main().catch(err => { 
+main().catch(err => {
     log.exception(err, 'Unhandled error in main');
-    process.exit(1); 
+    process.exit(1);
 });
