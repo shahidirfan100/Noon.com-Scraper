@@ -4,6 +4,7 @@ import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
 import { gotScraping } from 'got-scraping';
 import { HeaderGenerator } from 'header-generator';
+import { load as loadHtml } from 'cheerio';
 
 // Single-entrypoint main
 await Actor.init();
@@ -29,6 +30,8 @@ async function main() {
             url,
             maxProducts = 100,
             maxPages = 10,
+            fetchDetails = false, // enable detail-page enrichment (slower)
+            detailSampleLimit = 10, // limit number of detail fetches for speed
             proxyConfiguration,
         } = input;
 
@@ -92,6 +95,7 @@ async function main() {
                     url: url ? toAbs(url) : null,
                     image: product.image_url || product.image || product.thumbnail || null,
                     brand: cleanText(product.brand || product.brand_name) || null,
+                    description: cleanText(product.description || product.overview || product.summary) || null,
                     currentPrice: cleanPrice(product.sale_price || product.price || product.offer_price),
                     originalPrice: cleanPrice(product.was_price || product.list_price || product.original_price),
                     discount: product.discount_percentage || product.discount || null,
@@ -157,10 +161,12 @@ async function main() {
                                 'referer': catalogUrl,
                                 'origin': 'https://www.noon.com',
                                 'x-requested-with': 'XMLHttpRequest',
+                                'connection': 'keep-alive',
                             },
+                            http2: true,
                             responseType: 'json',
-                            timeout: { request: 30000 },
-                            retry: { limit: 3, methods: ['GET'] },
+                            timeout: { request: 20000 },
+                            retry: { limit: 2, methods: ['GET'] },
                             proxyUrl: proxyConf ? await proxyConf.newUrl() : undefined,
                         });
 
@@ -283,6 +289,7 @@ async function main() {
                     url: fullUrl,
                     image: image,
                     brand: brand,
+                    description: null, // filled via detail page enrichment if available
                     currentPrice: currentPrice,
                     originalPrice: originalPrice,
                     discount: discount,
@@ -319,6 +326,74 @@ async function main() {
             return true;
         }
 
+        /**
+         * Enrich product by fetching its detail page for missing fields
+         * Targets: description, brand, rating, reviewsCount
+         */
+        async function enrichProductWithDetails(product) {
+            if (!product?.url) return product;
+
+            const needsDetail = !product.description || !product.brand || !product.rating || !product.reviewsCount;
+            if (!needsDetail) return product;
+
+            try {
+                const headers = headerGenerator.getHeaders({ httpVersion: '2', locales: ['en-US', 'en-AE'] });
+                const resp = await gotScraping({
+                    url: product.url,
+                    method: 'GET',
+                    headers: {
+                        ...headers,
+                        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                        'accept-language': 'en-US,en;q=0.9',
+                        'upgrade-insecure-requests': '1',
+                        'sec-fetch-site': 'none',
+                        'sec-fetch-mode': 'navigate',
+                        'sec-fetch-dest': 'document',
+                    },
+                    timeout: { request: 30000 },
+                    retry: { limit: 2 },
+                    proxyUrl: proxyConf ? await proxyConf.newUrl() : undefined,
+                });
+
+                const $ = loadHtml(resp.body);
+
+                const description = cleanText(
+                    $('.OverviewTab-module-scss-module__NTeOuq__row').text() ||
+                    $('[data-qa*="overview"]').text() ||
+                    $('section:contains("Overview")').text()
+                ) || product.description;
+
+                const brand = cleanText(
+                    $('span.BrandStoreCtaV2-module-scss-module___vJ0Tq__textContent.BrandStoreCtaV2-module-scss-module___vJ0Tq__brandStoreText').text() ||
+                    $('a[aria-label*="brand"], a[href*="brand"] span').first().text()
+                ) || product.brand;
+
+                const ratingText = cleanText(
+                    $('div.NoonRatings-module-scss-module__ABB9HW__overallRating').first().text() ||
+                    $('[data-qa*="rating"]').first().text()
+                );
+                const rating = ratingText ? parseFloat(ratingText) : product.rating;
+
+                const reviewsText = cleanText(
+                    $('div.ProductReviewsFilters-module-scss-module__hOBdza__reviewTopicInner').first().text() ||
+                    $('[data-qa*="reviews"]').first().text()
+                );
+                const reviewsMatch = reviewsText.match(/\d+/);
+                const reviewsCount = reviewsMatch ? parseInt(reviewsMatch[0]) : product.reviewsCount;
+
+                return {
+                    ...product,
+                    description: description || product.description || null,
+                    brand: brand || product.brand || null,
+                    rating: rating ?? product.rating ?? null,
+                    reviewsCount: reviewsCount ?? product.reviewsCount ?? null,
+                };
+            } catch (err) {
+                log.warning(`Detail fetch failed for ${product.url}: ${err.message}`);
+                return product;
+            }
+        }
+
 
         // ==========================================
         // CRAWLER SETUP WITH DUAL APPROACH
@@ -335,13 +410,13 @@ async function main() {
                     maxErrorScore: 3,
                 },
             },
-            maxConcurrency: 3, // Low concurrency for stealth
-            minConcurrency: 1,
+            maxConcurrency: 6, // slightly higher for speed with API-first
+            minConcurrency: 2,
             requestHandlerTimeoutSecs: 120,
             navigationTimeoutSecs: 60,
             
-            // Add delays between requests for stealth
-            maxRequestsPerMinute: 30,
+            // Add moderate rate limit for stealth
+            maxRequestsPerMinute: 60,
             
             // Pre-navigation hook to add stealth headers
             preNavigationHooks: [
@@ -482,25 +557,35 @@ async function main() {
                     // STEP 3: Save validated products
                     // ========================================
                     if (productsToSave.length > 0) {
-                        const validProducts = productsToSave.filter(validateProduct);
-                        const toSave = validProducts.slice(0, MAX_PRODUCTS - saved);
-                        
-                        if (toSave.length > 0) {
-                            await Dataset.pushData(toSave);
-                            saved += toSave.length;
-                            crawlerLog.info(`💾 Saved ${toSave.length} products (Total: ${saved}/${MAX_PRODUCTS})`);
+                        const validProducts = productsToSave.filter(validateProduct).slice(0, MAX_PRODUCTS - saved);
+
+                        // Enrich products with detail page data where needed (optional for speed)
+                        const enrichedProducts = [];
+                        let detailFetched = 0;
+                        for (const prod of validProducts) {
+                            if (fetchDetails && detailFetched < detailSampleLimit) {
+                                const enriched = await enrichProductWithDetails(prod);
+                                enrichedProducts.push(enriched);
+                                detailFetched += 1;
+                            } else {
+                                enrichedProducts.push(prod);
+                            }
+                        }
+
+                        if (enrichedProducts.length > 0) {
+                            await Dataset.pushData(enrichedProducts);
+                            saved += enrichedProducts.length;
+                            crawlerLog.info(`💾 Saved ${enrichedProducts.length} products (Total: ${saved}/${MAX_PRODUCTS})`);
                             
                             // Log sample product for verification
-                            if (toSave.length > 0) {
-                                crawlerLog.debug(`Sample product: ${JSON.stringify(toSave[0], null, 2)}`);
-                            }
+                            crawlerLog.debug(`Sample product: ${JSON.stringify(enrichedProducts[0], null, 2)}`);
                         }
                     } else {
                         crawlerLog.warning('⚠️ No valid products to save from this page');
                     }
 
-                    // Add small delay between requests
-                    await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 2000));
+                    // Add small delay between requests (faster)
+                    await new Promise(resolve => setTimeout(resolve, 250 + Math.random() * 750));
                 }
             },
             
