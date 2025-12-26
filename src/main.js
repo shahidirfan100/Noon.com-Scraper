@@ -474,26 +474,28 @@ async function main() {
                     $('meta[property="og:description"]').attr('content')
                 );
 
+                // Description container - some products have text, others only have specs table
                 const description = cleanText(
                     $('div.OverviewTab-module-scss-module__NTeOuq__container').text() ||
+                    $('[class*="OverviewTab"][class*="container"]').text() ||
+                    $('#OverviewArea').text() ||
                     $('[data-qa*="overview"]').text() ||
-                    $('#OverviewArea + div').text() ||
-                    $('[class*="OverviewTab"]').text() ||
                     metaDescription ||
                     ldDescription
                 ) || product.description;
 
-                // Brand - use exact user-provided selector first
+                // Brand - use exact user-provided selector with textContent child
                 const brand = cleanText(
-                    $('div.BrandStoreCtaV2-module-scss-module___vJ0Tq__brandAndVariantsButton').text() ||
-                    $('[class*="BrandStoreCtaV2"]').first().text() ||
+                    $('div.BrandStoreCtaV2-module-scss-module___vJ0Tq__brandAndVariantsButton [class*="textContent"]').text() ||
+                    $('[class*="BrandStoreCtaV2"] [class*="textContent"]').first().text() ||
+                    $('a.BrandStoreCtaV2-module-scss-module___vJ0Tq__brandStoreLink').first().text() ||
                     $('a[href*="/brand/"]').first().text() ||
                     $('[data-qa*="brand"]').first().text() ||
                     ldBrand
                 ) || product.brand;
 
-                // Rating - use exact user-provided selector first
-                const ratingElement = $('div.RatingPreviewStarV2-module-scss-module__0_8vQW__starsCtr');
+                // Rating - use exact user-provided selector with span child for text
+                const ratingElement = $('div.RatingPreviewStarV2-module-scss-module__0_8vQW__starsCtr span.RatingPreviewStarV2-module-scss-module__0_8vQW__text');
                 let rating = null;
                 if (ratingElement.length) {
                     const ratingText = ratingElement.text();
@@ -502,32 +504,43 @@ async function main() {
                 }
                 if (!rating && ldRating) rating = ldRating;
                 if (!rating) {
-                    // Fallback to regex on page text
+                    // Fallback to searching in page text
                     const pageText = $('body').text();
-                    const fallbackMatch = pageText.match(/\b([1-5]\.\d)\s*(?:out of 5|\/5|\s*stars?)?/i);
+                    const fallbackMatch = pageText.match(/\b([1-5]\.\d{1,2})\s*(?:out of 5|\/5|\s*stars?)?/i);
                     if (fallbackMatch) rating = parseFloat(fallbackMatch[1]);
                 }
                 rating = rating || product.rating;
 
-                // Reviews count - use exact user-provided selector first
-                const reviewsElement = $('div.RatingPreviewStarV2-module-scss-module__0_8vQW__ratingsCountCtr');
+                // Reviews count - extract from "Based on X ratings" text
                 let reviewsCount = null;
-                if (reviewsElement.length) {
-                    const reviewsText = reviewsElement.text();
-                    const reviewsMatch = reviewsText.match(/(\d+(?:,\d+)*(?:\.\d+)?K?)/i);
-                    if (reviewsMatch) {
-                        const reviewStr = reviewsMatch[1];
-                        if (reviewStr.toUpperCase().includes('K')) {
-                            reviewsCount = Math.round(parseFloat(reviewStr.replace(/K/i, '')) * 1000);
-                        } else {
-                            reviewsCount = parseInt(reviewStr.replace(/,/g, ''));
+                const pageText = $('body').text();
+
+                // Try to find "Based on X ratings" pattern first (most reliable)
+                const basedOnMatch = pageText.match(/Based on ([\d,]+)\s*(?:ratings?|reviews?)/i);
+                if (basedOnMatch) {
+                    reviewsCount = parseInt(basedOnMatch[1].replace(/,/g, ''));
+                } else {
+                    // Fallback to other patterns
+                    const reviewsElement = $('div.RatingPreviewStarV2-module-scss-module__0_8vQW__ratingsCountCtr');
+                    if (reviewsElement.length) {
+                        const reviewsText = reviewsElement.text();
+                        // Skip if it's just "Brand Rating"
+                        if (!reviewsText.includes('Brand Rating')) {
+                            const reviewsMatch = reviewsText.match(/(\d+(?:,\d+)*(?:\.\d+)?K?)/i);
+                            if (reviewsMatch) {
+                                const reviewStr = reviewsMatch[1];
+                                if (reviewStr.toUpperCase().includes('K')) {
+                                    reviewsCount = Math.round(parseFloat(reviewStr.replace(/K/i, '')) * 1000);
+                                } else {
+                                    reviewsCount = parseInt(reviewStr.replace(/,/g, ''));
+                                }
+                            }
                         }
                     }
                 }
                 if (!reviewsCount && ldReviews) reviewsCount = ldReviews;
                 if (!reviewsCount) {
-                    // Fallback to regex on page text
-                    const pageText = $('body').text();
+                    // Final fallback to regex on page text
                     const patterns = [
                         /(\d+(?:,\d+)*)\s*(?:ratings?|reviews?)/i,
                         /\((\d+(?:,\d+)*)\)/
