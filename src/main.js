@@ -313,13 +313,13 @@ async function main() {
             
             // Required fields
             if (!product.title || !product.url) {
-                log.softFail(`Invalid product: missing required fields (title or url)`);
+                log.warning(`⚠️ Invalid product: missing required fields (title or url)`);
                 return false;
             }
 
             // Title validation
             if (product.title.length < 5 || product.title.length > 500) {
-                log.softFail(`Invalid product: title length out of range`);
+                log.warning(`⚠️ Invalid product: title length out of range`);
                 return false;
             }
 
