@@ -31,12 +31,15 @@ async function main() {
             maxProducts = 100,
             maxPages = 10,
             fetchDetails = true, // enable detail-page enrichment by default (limits below keep it light)
-            detailSampleLimit = 10, // limit number of detail fetches for speed
+            detailSampleLimit = null, // if null/undefined we enrich as many as possible (bounded below)
             proxyConfiguration,
         } = input;
 
         const MAX_PRODUCTS = Number.isFinite(+maxProducts) ? Math.max(1, +maxProducts) : 100;
         const MAX_PAGES = Number.isFinite(+maxPages) ? Math.max(1, +maxPages) : 10;
+        const DETAIL_LIMIT = Number.isFinite(+detailSampleLimit)
+            ? Math.max(0, Math.min(+detailSampleLimit, MAX_PRODUCTS))
+            : MAX_PRODUCTS;
 
         log.info(`Starting scraper: maxProducts=${MAX_PRODUCTS}, maxPages=${MAX_PAGES}`);
 
@@ -70,6 +73,19 @@ async function main() {
         let saved = 0;
         let pageCount = 0;
         const errors = [];
+        const pushBuffer = [];
+        const BATCH_SIZE = 50;
+        let flushPromise = Promise.resolve();
+
+        const flushBuffer = (force = false) => {
+            flushPromise = flushPromise.then(async () => {
+                if (pushBuffer.length >= BATCH_SIZE || (force && pushBuffer.length > 0)) {
+                    const batch = pushBuffer.splice(0, pushBuffer.length);
+                    await Dataset.pushData(batch);
+                }
+            });
+            return flushPromise;
+        };
 
         // ==========================================
         // API-BASED SCRAPING (PRIMARY METHOD)
@@ -165,10 +181,16 @@ async function main() {
                             },
                             http2: true,
                             responseType: 'json',
-                            timeout: { request: 20000 },
-                            retry: { limit: 2, methods: ['GET'] },
+                            timeout: { request: 10000 },
+                            retry: { limit: 1, methods: ['GET'] },
+                            throwHttpErrors: false,
                             proxyUrl: proxyConf ? await proxyConf.newUrl() : undefined,
                         });
+
+                        if (response.statusCode && response.statusCode >= 400) {
+                            log.debug(`[API] Endpoint ${apiUrl} returned ${response.statusCode}`);
+                            continue;
+                        }
 
                         if (response.body && typeof response.body === 'object') {
                             log.info(`[API] Success! Got response from: ${apiUrl}`);
@@ -269,14 +291,20 @@ async function main() {
                 const discount = discountText ? cleanText(discountText) : null;
                 
                 // Rating
+                const ratingNode = $product.find('[data-qa*="rating"], [aria-label*="rating"], [class*="rating"]').first();
                 const ratingText = cleanText(
-                    $product.find('[data-qa*="rating"], [aria-label*="rating"], [class*="rating"]').first().text()
+                    ratingNode.attr('aria-label') ||
+                    ratingNode.attr('data-rating') ||
+                    ratingNode.text()
                 );
                 const rating = ratingText ? parseFloat((ratingText.match(/[0-9.]+/) || [])[0]) : null;
                 
                 // Reviews count
+                const reviewsNode = $product.find('[class*="reviews"], [class*="rating"], [aria-label*="review"], [data-qa*="review"]').first();
                 const reviewsText = cleanText(
-                    $product.find('[class*="reviews"], [class*="rating"], [aria-label*="review"]').text() ||
+                    reviewsNode.attr('aria-label') ||
+                    reviewsNode.attr('data-review-count') ||
+                    reviewsNode.text() ||
                     ratingText
                 );
                 const reviewsMatch = reviewsText.match(/\d{1,3}(?:,\d{3})*/);
@@ -357,8 +385,8 @@ async function main() {
                         'sec-fetch-mode': 'navigate',
                         'sec-fetch-dest': 'document',
                     },
-                    timeout: { request: 30000 },
-                    retry: { limit: 2 },
+                    timeout: { request: 20000 },
+                    retry: { limit: 1 },
                     proxyUrl: proxyConf ? await proxyConf.newUrl() : undefined,
                 });
 
@@ -614,7 +642,7 @@ async function main() {
                         let detailFetched = 0;
                         for (const prod of validProducts) {
                             const needsDetail = !prod.description || !prod.brand || !prod.rating || !prod.reviewsCount;
-                            if (fetchDetails && detailFetched < detailSampleLimit && needsDetail) {
+                            if (fetchDetails && detailFetched < DETAIL_LIMIT && needsDetail) {
                                 const enriched = await enrichProductWithDetails(prod);
                                 enrichedProducts.push(enriched);
                                 detailFetched += 1;
@@ -624,7 +652,8 @@ async function main() {
                         }
 
                         if (enrichedProducts.length > 0) {
-                            await Dataset.pushData(enrichedProducts);
+                            pushBuffer.push(...enrichedProducts);
+                            await flushBuffer();
                             saved += enrichedProducts.length;
                             crawlerLog.info(`💾 Saved ${enrichedProducts.length} products (Total: ${saved}/${MAX_PRODUCTS})`);
                             
@@ -670,6 +699,7 @@ async function main() {
             userData: { label: 'LIST', page: 1 },
             uniqueKey: `start-${idx}`,
         })));
+        await flushBuffer(true);
         
         // ==========================================
         // FINAL SUMMARY
