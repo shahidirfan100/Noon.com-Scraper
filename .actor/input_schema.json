@@ -11,15 +11,6 @@
       "editor": "textfield",
       "prefill": "https://www.noon.com/uae-en/fashion/men-31225/crazy-price-drops-ae-FA_03/"
     },
-    "startUrls": {
-      "title": "Start URLs (Multiple)",
-      "type": "array",
-      "description": "Array of Noon.com URLs to scrape. Each entry should be a URL object with a 'url' property.",
-      "editor": "requestListSources",
-      "prefill": [
-        { "url": "https://www.noon.com/uae-en/fashion/men-31225/crazy-price-drops-ae-FA_03/" }
-      ]
-    },
     "maxProducts": {
       "title": "Maximum Products",
       "type": "integer",
